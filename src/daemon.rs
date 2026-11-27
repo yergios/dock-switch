@@ -61,6 +61,7 @@ struct Daemon {
     /// In creation order, which is also the order an app's windows cycle in.
     windows: Vec<Window>,
     entries: Vec<DesktopEntry>,
+    entries_stamp: apps::ScanStamp,
     favorites: Vec<String>,
     /// Group key of each favorite, same order.
     pinned: Vec<String>,
@@ -80,41 +81,57 @@ impl Daemon {
             self.unknown_apps += 1;
             return format!("unknown-{}", self.unknown_apps);
         }
-        if let Some(i) = apps::find(&self.entries, app_id) {
-            return self.entries[i].id.clone();
+        if apps::find(&self.entries, app_id).is_none() {
+            // The app may have been installed after we loaded the entries.
+            self.refresh_entries();
         }
-        // The app may have been installed after we loaded the entries.
-        self.entries = apps::load_entries();
         match apps::find(&self.entries, app_id) {
             Some(i) => self.entries[i].id.clone(),
             None => app_id.to_string(),
         }
     }
 
+    /// Rescans desktop entries if any scanned directory changed. Unmatched
+    /// app ids would otherwise cost a full scan each (any app can pick one),
+    /// so the check is a few stats. Pins are re-resolved afterwards, since a
+    /// pin whose app was missing may now have an entry.
+    fn refresh_entries(&mut self) {
+        if !self.entries_stamp.changed() {
+            return;
+        }
+        (self.entries, self.entries_stamp) = apps::load_entries();
+        self.set_pins(self.favorites.clone());
+    }
+
     fn has_windows(&self, key: &str) -> bool {
         self.windows.iter().any(|w| w.group == key)
     }
 
-    /// Re-reads the dock's pins and applies the dock's rules for pin changes:
-    /// an unpinned running app moves to the end, a pinned one leaves the
-    /// running list.
+    /// Re-reads the dock's pins and applies them if they changed.
     fn reload_favorites(&mut self) {
         let favorites = apps::load_favorites();
         if favorites == self.favorites {
             return;
         }
-        let resolve = |entries: &[DesktopEntry], fav: &str| {
-            apps::find(entries, fav).map(|i| entries[i].id.clone())
-        };
         if favorites
             .iter()
-            .any(|f| resolve(&self.entries, f).is_none())
+            .any(|f| apps::find(&self.entries, f).is_none())
         {
-            self.entries = apps::load_entries();
+            self.refresh_entries();
         }
+        self.set_pins(favorites);
+    }
+
+    /// Resolves pins to group keys and applies the dock's rules for pin
+    /// changes: an unpinned running app moves to the end, a pinned one leaves
+    /// the running list.
+    fn set_pins(&mut self, favorites: Vec<String>) {
         let pinned: Vec<String> = favorites
             .iter()
-            .map(|f| resolve(&self.entries, f).unwrap_or_else(|| f.clone()))
+            .map(|f| match apps::find(&self.entries, f) {
+                Some(i) => self.entries[i].id.clone(),
+                None => f.clone(),
+            })
             .collect();
 
         for key in &self.pinned {
@@ -178,10 +195,15 @@ impl Daemon {
         self.reload_favorites();
         // Resolved after the reload, since a pin change can move the last slot.
         let slot = slot.unwrap_or_else(|| self.slots().count());
-        self.slots()
-            .nth(slot.wrapping_sub(1))
-            .cloned()
-            .ok_or_else(|| format!("no app in slot {slot}"))
+        let key_at = |d: &Self| d.slots().nth(slot.wrapping_sub(1)).cloned();
+        let key = key_at(self).ok_or_else(|| format!("no app in slot {slot}"))?;
+        // A pin with no entry and no windows may be an app installed since
+        // the last scan; a rescan re-resolves the pins.
+        if !self.has_windows(&key) && !self.entries.iter().any(|e| e.id == key) {
+            self.refresh_entries();
+            return key_at(self).ok_or_else(|| format!("no app in slot {slot}"));
+        }
+        Ok(key)
     }
 
     fn switch(&mut self, slot: Option<usize>) -> Result<Reply, String> {
@@ -309,9 +331,11 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     let manager: ZcosmicToplevelManagerV1 = globals.bind(&qh, 1..=4, ())?;
     let _list: ExtForeignToplevelListV1 = globals.bind(&qh, 1..=1, ())?;
 
+    let (entries, entries_stamp) = apps::load_entries();
     let mut daemon = Daemon {
         windows: Vec::new(),
-        entries: apps::load_entries(),
+        entries,
+        entries_stamp,
         favorites: Vec::new(),
         pinned: Vec::new(),
         running: Vec::new(),

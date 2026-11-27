@@ -1,9 +1,9 @@
 //! Desktop entries and dock pins, matched the way the COSMIC dock does it, so
 //! our slot numbers agree with what the dock shows.
 
-use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 pub struct DesktopEntry {
     /// Desktop file id: the path below `applications/` with `/` turned into
@@ -32,9 +32,26 @@ fn env_dir(var: &str, fallback: impl FnOnce() -> PathBuf) -> PathBuf {
     }
 }
 
+/// Every directory a scan looked at, with its modification time (None if it
+/// did not exist). Installing or removing an app adds or removes a file and
+/// so changes its directory's time, which lets an unchanged tree skip a
+/// rescan. An entry edited in place is not noticed until something else
+/// changes the directory.
+pub struct ScanStamp(Vec<(PathBuf, Option<SystemTime>)>);
+
+impl ScanStamp {
+    pub fn changed(&self) -> bool {
+        self.0.iter().any(|(dir, time)| mtime(dir) != *time)
+    }
+}
+
+fn mtime(path: &Path) -> Option<SystemTime> {
+    fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
 /// Every desktop entry, data home first, so a user's copy of an entry is
 /// found before the system one.
-pub fn load_entries() -> Vec<DesktopEntry> {
+pub fn load_entries() -> (Vec<DesktopEntry>, ScanStamp) {
     let mut dirs = vec![env_dir("XDG_DATA_HOME", || home().join(".local/share"))];
     let data_dirs = std::env::var("XDG_DATA_DIRS")
         .ok()
@@ -49,22 +66,29 @@ pub fn load_entries() -> Vec<DesktopEntry> {
     );
 
     let mut entries = Vec::new();
-    let mut visited = HashSet::new();
+    let mut seen = Vec::new();
     for dir in dirs {
-        collect(&dir.join("applications"), &mut entries, &mut visited);
+        collect(&dir.join("applications"), &mut entries, &mut seen);
     }
-    entries
+    (entries, ScanStamp(seen))
 }
 
 /// Walks the way the dock's library does, since the first match wins and
 /// order decides ties: a directory's files in sorted order, then its
 /// subdirectories in reverse sorted order. Directories are followed through
 /// symlinks but each is visited once, which also stops symlink loops.
-fn collect(dir: &Path, out: &mut Vec<DesktopEntry>, visited: &mut HashSet<PathBuf>) {
-    let Ok(dir) = dir.canonicalize() else { return };
-    if !visited.insert(dir.clone()) {
+/// `seen` holds the directories visited so far (a handful, so a list).
+fn collect(dir: &Path, out: &mut Vec<DesktopEntry>, seen: &mut Vec<(PathBuf, Option<SystemTime>)>) {
+    let Ok(dir) = dir.canonicalize() else {
+        // Remember missing directories too, so creating one is noticed.
+        seen.push((dir.to_path_buf(), None));
+        return;
+    };
+    if seen.iter().any(|(d, _)| *d == dir) {
         return;
     }
+    // Stamped before reading, so a change during the scan triggers the next.
+    seen.push((dir.clone(), mtime(&dir)));
     let Ok(read) = fs::read_dir(&dir) else { return };
     let mut paths: Vec<PathBuf> = read.filter_map(|e| e.ok().map(|e| e.path())).collect();
     paths.sort();
@@ -84,7 +108,7 @@ fn collect(dir: &Path, out: &mut Vec<DesktopEntry>, visited: &mut HashSet<PathBu
         }
     }
     for sub in subdirs.iter().rev() {
-        collect(sub, out, visited);
+        collect(sub, out, seen);
     }
 }
 
@@ -245,8 +269,17 @@ mod tests {
         std::os::unix::fs::symlink(&apps, apps.join("loop")).unwrap();
 
         let mut out = Vec::new();
-        collect(&apps, &mut out, &mut HashSet::new());
+        let mut seen = Vec::new();
+        collect(&apps, &mut out, &mut seen);
         let ids: Vec<&str> = out.iter().map(|e| e.id.as_str()).collect();
+
+        // Adding a file in any scanned directory, nested ones included, marks
+        // the scan stale; nothing changing keeps it fresh.
+        let stamp = ScanStamp(seen);
+        assert!(!stamp.changed());
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        fs::write(apps.join("wine/Programs/new.desktop"), desktop).unwrap();
+        assert!(stamp.changed());
         fs::remove_dir_all(&root).unwrap();
 
         // Files first, then subdirectories in reverse order; the oversized

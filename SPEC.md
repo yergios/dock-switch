@@ -119,8 +119,11 @@ the old daemon instead of starting the new one.
   holder replaces a stale socket file.
 - The favorites file is re-read on each request and when a window gets a new
   app ID, so pin changes apply without a restart.
-- Desktop entries are reloaded when a lookup misses, so newly installed apps
-  are found.
+- Desktop entries are rescanned when a lookup misses (a window, a pin, or a
+  slot whose pin has no entry), but only if a scanned directory's mtime
+  changed, so unmatched app ids cost a few stats rather than a full scan.
+  Pins are re-resolved after each rescan. An entry edited in place is not
+  noticed until its directory changes.
 
 ## Files
 
