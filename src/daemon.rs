@@ -3,7 +3,7 @@
 
 use std::error::Error;
 use std::fmt::Write as _;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::time::{Duration, Instant};
 
@@ -236,7 +236,7 @@ impl Daemon {
             } else {
                 ""
             };
-            let _ = writeln!(out, "{}  {key}{pin}", n + 1);
+            let _ = writeln!(out, "{}  {}{pin}", n + 1, printable(key));
             for &i in &self.group_windows(key) {
                 let w = &self.windows[i];
                 let mark = match (w.activated && !w.minimized, w.minimized) {
@@ -244,18 +244,16 @@ impl Daemon {
                     (_, true) => "minimized",
                     _ => "         ",
                 };
-                let _ = writeln!(out, "     {mark}  {}  {}", w.app_id, w.title);
+                let (app_id, title) = (printable(&w.app_id), printable(&w.title));
+                let _ = writeln!(out, "     {mark}  {app_id}  {title}");
             }
         }
         out
     }
 
     fn serve(&mut self, stream: UnixStream) -> io::Result<()> {
-        // A client that stalls must not freeze window tracking.
-        stream.set_read_timeout(Some(Duration::from_millis(200)))?;
         stream.set_write_timeout(Some(Duration::from_millis(200)))?;
-        let mut line = String::new();
-        BufReader::new(&stream).read_line(&mut line)?;
+        let line = read_request(&stream)?;
 
         let words: Vec<&str> = line.split_whitespace().collect();
         let reply = match words.as_slice() {
@@ -336,7 +334,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         let Some(left) = deadline.checked_duration_since(Instant::now()) else {
             break;
         };
-        conn.flush()?;
+        flush(&conn)?;
         if let Some(guard) = queue.prepare_read() {
             let timeout = rustix::time::Timespec::try_from(left)?;
             let ready = {
@@ -356,7 +354,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
 
     loop {
         queue.dispatch_pending(&mut daemon)?;
-        conn.flush()?;
+        flush(&conn)?;
         let Some(guard) = queue.prepare_read() else {
             continue;
         };
@@ -381,12 +379,64 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             drop(guard);
         }
         if client_ready {
-            while let Ok((stream, _)) = listener.accept() {
+            // Bounded, so a flood of connections cannot starve window
+            // tracking; the rest are served on the next pass.
+            for _ in 0..16 {
+                let Ok((stream, _)) = listener.accept() else {
+                    break;
+                };
                 if let Err(e) = daemon.serve(stream) {
                     eprintln!("dock-switch: request failed: {e}");
                 }
             }
         }
+    }
+}
+
+/// Longest valid request is `switch <number>`; anything near this is garbage.
+const MAX_REQUEST: usize = 64;
+
+/// Reads one request line. The deadline covers the whole request, not each
+/// read, so a client trickling bytes cannot hold up window tracking.
+fn read_request(stream: &UnixStream) -> io::Result<String> {
+    let deadline = Instant::now() + Duration::from_millis(200);
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; MAX_REQUEST];
+    while !buf.contains(&b'\n') {
+        let left = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|d| !d.is_zero())
+            .ok_or(io::ErrorKind::TimedOut)?;
+        stream.set_read_timeout(Some(left))?;
+        let n = (&*stream).read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if buf.len() > MAX_REQUEST {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "request too long",
+            ));
+        }
+    }
+    String::from_utf8(buf).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "not UTF-8"))
+}
+
+/// Window titles come from apps (a web page sets its tab's title), so
+/// control characters are replaced before they reach a terminal.
+fn printable(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect()
+}
+
+/// Sends buffered requests. A full socket buffer is not fatal: what is left
+/// goes out on the next pass of the loop.
+fn flush(conn: &Connection) -> Result<(), WaylandError> {
+    match conn.flush() {
+        Err(WaylandError::Io(e)) if e.kind() == io::ErrorKind::WouldBlock => Ok(()),
+        other => other,
     }
 }
 
@@ -523,5 +573,37 @@ impl Dispatch<ZcosmicToplevelHandleV1, ()> for Daemon {
         state.windows[i].activated = activated;
         state.windows[i].minimized = flags.contains(&STATE_MINIMIZED);
         state.windows[i].state_known = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_requests_within_limits() {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        client.write_all(b"switch 3\n").unwrap();
+        assert_eq!(read_request(&server).unwrap(), "switch 3\n");
+
+        let (mut client, server) = UnixStream::pair().unwrap();
+        client.write_all(&[b'x'; MAX_REQUEST + 1]).unwrap();
+        assert_eq!(
+            read_request(&server).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+
+        // No newline and no hang-up: the whole-request deadline ends it.
+        let (mut client, server) = UnixStream::pair().unwrap();
+        client.write_all(b"swi").unwrap();
+        let started = Instant::now();
+        assert!(read_request(&server).is_err());
+        assert!(started.elapsed() < Duration::from_millis(400));
+    }
+
+    #[test]
+    fn strips_control_characters() {
+        assert_eq!(printable("a\x1b]52;c;evil\x07b\u{9b}"), "a?]52;c;evil?b?");
+        assert_eq!(printable("Zen — Ecosia"), "Zen — Ecosia");
     }
 }

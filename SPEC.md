@@ -105,6 +105,10 @@ the old daemon instead of starting the new one.
 - On start the daemon waits, up to 500 ms, for COSMIC's deferred batch of
   window states before serving requests; until then it cannot tell which
   window is focused.
+- A request must arrive whole within 200 ms and 64 bytes, and at most 16
+  connections are served per loop pass, so a stalling or flooding client
+  cannot hold up window tracking. `list` replaces control characters in
+  app-supplied text (titles, app ids) before printing.
 - One daemon per user: it holds an exclusive `flock` on
   `$XDG_RUNTIME_DIR/dock-switch.lock`, and a second one exits. Only the lock
   holder replaces a stale socket file.
