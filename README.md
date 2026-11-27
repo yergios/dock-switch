@@ -1,5 +1,7 @@
 # dock-switch
 
+[![CI](https://github.com/yergios/dock-switch/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/yergios/dock-switch/actions/workflows/ci.yml)
+
 Windows-style `Super+Number` app switching for the COSMIC desktop (Wayland).
 `Super+N` launches, focuses, cycles or minimizes the app in dock slot N,
 `Super+0` targets the last slot, and `Super+Shift+N` opens a new window.
