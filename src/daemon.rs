@@ -5,7 +5,6 @@ use std::error::Error;
 use std::fmt::Write as _;
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use rustix::event::{PollFd, PollFlags, poll};
@@ -46,6 +45,14 @@ struct Window {
     minimized: bool,
     /// Value of `Daemon::focus_clock` when the window last gained focus.
     last_focus: u64,
+}
+
+/// What a successful request asks of the client.
+enum Reply {
+    Done,
+    Output(String),
+    /// Run this desktop file.
+    Launch(String),
 }
 
 struct Daemon {
@@ -175,7 +182,7 @@ impl Daemon {
             .ok_or_else(|| format!("no app in slot {slot}"))
     }
 
-    fn switch(&mut self, slot: Option<usize>) -> Result<String, String> {
+    fn switch(&mut self, slot: Option<usize>) -> Result<Reply, String> {
         let key = self.slot_key(slot)?;
         let group = self.group_windows(&key);
         if group.is_empty() {
@@ -186,10 +193,10 @@ impl Daemon {
         if let Some(pos) = group.iter().position(is_focused) {
             if group.len() == 1 {
                 self.manager.set_minimized(&self.windows[group[0]].cosmic);
-                return Ok(String::new());
+                return Ok(Reply::Done);
             }
             self.focus(group[(pos + 1) % group.len()]);
-            return Ok(String::new());
+            return Ok(Reply::Done);
         }
 
         // Without any focus history yet, the newest window wins the tie.
@@ -198,26 +205,25 @@ impl Daemon {
             .copied()
             .max_by_key(|&i| self.windows[i].last_focus);
         self.focus(target.expect("group is not empty"));
-        Ok(String::new())
+        Ok(Reply::Done)
     }
 
-    fn launch(&self, key: &str) -> Result<String, String> {
+    /// Tells the client which desktop file to run. The client runs it, not
+    /// the daemon: COSMIC starts the client fresh for each keypress with the
+    /// session's environment, while the daemon may have inherited a
+    /// terminal's (variables, secrets, working directory) when a command
+    /// started it, and launched apps would inherit that in turn.
+    fn launch(&self, key: &str) -> Result<Reply, String> {
         let entry = self
             .entries
             .iter()
             .find(|e| e.id == key)
             .ok_or_else(|| format!("no desktop entry for '{key}'"))?;
-        // gio handles Exec field codes and DBusActivatable entries.
-        let mut child = Command::new("gio")
-            .arg("launch")
-            .arg(&entry.path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("cannot run gio: {e}"))?;
-        // gio exits once the app is started; reap it so it does not linger.
-        std::thread::spawn(move || child.wait());
-        Ok(String::new())
+        // The reply is line-based, so the path must be one line.
+        match entry.path.to_str() {
+            Some(path) if !path.contains('\n') => Ok(Reply::Launch(path.to_string())),
+            _ => Err(format!("unusable desktop file path for '{key}'")),
+        }
     }
 
     fn list(&self) -> String {
@@ -263,11 +269,13 @@ impl Daemon {
                     _ => self.slot_key(slot).and_then(|key| self.launch(&key)),
                 })
             }
-            ["list"] => Ok(self.list()),
+            ["list"] => Ok(Reply::Output(self.list())),
             _ => Err(format!("unknown request '{}'", line.trim())),
         };
         let text = match reply {
-            Ok(out) => format!("ok\n{out}"),
+            Ok(Reply::Done) => "ok\n".to_string(),
+            Ok(Reply::Output(out)) => format!("ok\n{out}"),
+            Ok(Reply::Launch(path)) => format!("launch {path}\n"),
             Err(msg) => format!("err {msg}\n"),
         };
         (&stream).write_all(text.as_bytes())
@@ -275,6 +283,11 @@ impl Daemon {
 }
 
 pub fn run() -> Result<(), Box<dyn Error>> {
+    // Do not keep the directory we were started from busy; it may be a mount
+    // the user wants to unmount.
+    if let Some(home) = std::env::var_os("HOME") {
+        let _ = std::env::set_current_dir(home);
+    }
     let path = crate::socket_path()?;
     if UnixStream::connect(&path).is_ok() {
         eprintln!("dock-switch: daemon already running");

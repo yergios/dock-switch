@@ -6,8 +6,9 @@ XDG_CONFIG_HOME ?= $(HOME)/.config
 AUTOSTART_DIR ?= $(XDG_CONFIG_HOME)/autostart
 
 BIN := target/release/dock-switch
-# Matches any dock-switch daemon of this user, whichever binary it runs from.
-STOP_DAEMON := pkill -u "$$(id -u)" -xf '.*/dock-switch daemon'
+# Matches this user's processes named exactly dock-switch, whatever path
+# they run from.
+STOP_DAEMON := pkill -u "$$(id -u)" -x dock-switch
 
 .PHONY: build test install shortcuts uninstall
 
@@ -21,10 +22,10 @@ install: build
 	install -Dm755 $(BIN) "$(BINDIR)/dock-switch"
 	install -d "$(AUTOSTART_DIR)"
 	sed 's|@BINDIR@|$(BINDIR)|' dist/dock-switch.desktop.in > "$(AUTOSTART_DIR)/dock-switch.desktop"
-	@# Replace a running daemon so the new binary takes over; the client
-	@# starts a fresh one on its first request.
+	@# Stop a running daemon so the new binary takes over. The next keypress
+	@# starts a fresh one; starting it from here would hand it this shell's
+	@# environment and directory.
 	-$(STOP_DAEMON)
-	"$(BINDIR)/dock-switch" list > /dev/null
 
 # Adds the Super+Number bindings to COSMIC, pointing at the installed binary.
 shortcuts: install

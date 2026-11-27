@@ -80,8 +80,8 @@ because it is GPL-3.0-only.
 
 **IPC:** a Unix socket at `$XDG_RUNTIME_DIR/dock-switch.sock` (that directory
 is private to the user). The client sends one line (`switch 3`, `new 3`,
-`list`); the daemon replies `ok` or `err <message>`, optionally followed by
-output lines, then closes the connection.
+`list`); the daemon replies `ok` (optionally followed by output lines),
+`launch <desktop file>` or `err <message>`, then closes the connection.
 
 **Event loop:** single-threaded. It polls the Wayland fd and the listening
 socket together, so there are no locks.
@@ -89,8 +89,13 @@ socket together, so there are no locks.
 **Focus history:** each time a window gains the activated state it gets the
 next value of a counter. "Most recently used" is the highest value.
 
-**Launching:** `gio launch <desktop file>`, which handles `Exec` field codes
-and `DBusActivatable` entries. The daemon reaps each launcher process.
+**Launching:** the client runs `gio launch <desktop file>`, which handles
+`Exec` field codes and `DBusActivatable` entries. The daemon only picks the
+file: COSMIC starts the client fresh for each keypress with the session's
+environment, whereas a daemon started from a terminal carries that terminal's
+environment and directory, which launched apps would inherit. For the same
+reason the daemon changes to `$HOME` on start, and `make install` only stops
+the old daemon instead of starting the new one.
 
 **Robustness:**
 

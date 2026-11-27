@@ -64,6 +64,8 @@ fn request(line: &str) -> Result<i32, Box<dyn Error>> {
     if let Some(out) = reply.strip_prefix("ok\n") {
         print!("{out}");
         Ok(0)
+    } else if let Some(path) = reply.strip_prefix("launch ") {
+        launch(path.trim_end_matches('\n'))
     } else {
         eprint!(
             "dock-switch: {}",
@@ -71,6 +73,21 @@ fn request(line: &str) -> Result<i32, Box<dyn Error>> {
         );
         Ok(1)
     }
+}
+
+/// Runs a desktop file with this process's environment, which for a keypress
+/// is the clean one COSMIC gives the shortcut.
+fn launch(desktop_file: &str) -> Result<i32, Box<dyn Error>> {
+    // gio handles Exec field codes and DBusActivatable entries, and exits
+    // once the app has started.
+    let status = Command::new("gio")
+        .arg("launch")
+        .arg(desktop_file)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .status()
+        .map_err(|e| format!("cannot run gio: {e}"))?;
+    Ok(if status.success() { 0 } else { 1 })
 }
 
 fn start_daemon() -> Result<(), Box<dyn Error>> {
