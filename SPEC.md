@@ -99,10 +99,15 @@ the old daemon instead of starting the new one.
 
 **Robustness:**
 
-- If the client cannot reach the daemon, it starts one and retries for up to
-  1 s, so a crashed or missing daemon costs one slower keypress.
-- A second daemon exits if the socket already answers; a stale socket file is
-  replaced.
+- If the client cannot reach the daemon, it starts one and retries every 2 ms
+  for up to 1 s, so a crashed or missing daemon costs one slower keypress
+  (about 160 ms, see the next point).
+- On start the daemon waits, up to 500 ms, for COSMIC's deferred batch of
+  window states before serving requests; until then it cannot tell which
+  window is focused.
+- One daemon per user: it holds an exclusive `flock` on
+  `$XDG_RUNTIME_DIR/dock-switch.lock`, and a second one exits. Only the lock
+  holder replaces a stale socket file.
 - The favorites file is re-read on each request and when a window gets a new
   app ID, so pin changes apply without a restart.
 - Desktop entries are reloaded when a lookup misses, so newly installed apps

@@ -5,7 +5,7 @@ use std::error::Error;
 use std::fmt::Write as _;
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rustix::event::{PollFd, PollFlags, poll};
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
@@ -45,6 +45,8 @@ struct Window {
     minimized: bool,
     /// Value of `Daemon::focus_clock` when the window last gained focus.
     last_focus: u64,
+    /// Whether COSMIC has sent the window's state (activated, minimized) yet.
+    state_known: bool,
 }
 
 /// What a successful request asks of the client.
@@ -289,7 +291,11 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         let _ = std::env::set_current_dir(home);
     }
     let path = crate::socket_path()?;
-    if UnixStream::connect(&path).is_ok() {
+    // Held for the daemon's lifetime. Checking the socket instead would race:
+    // two daemons starting together could both see none, and the second
+    // would unlink the first one's socket, leaving it running unreachable.
+    let lock = std::fs::File::create(path.with_extension("lock"))?;
+    if rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_err() {
         eprintln!("dock-switch: daemon already running");
         return Ok(());
     }
@@ -321,6 +327,33 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     daemon.reload_favorites();
     queue.roundtrip(&mut daemon)?;
 
+    // COSMIC sends each window's state in a deferred batch, a while after the
+    // handle is requested. Serving a request before it arrives would see no
+    // focused window, so a keypress that started the daemon would activate
+    // instead of minimize. Clients wait in the listen backlog meanwhile.
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while daemon.windows.iter().any(|w| !w.state_known) {
+        let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+            break;
+        };
+        conn.flush()?;
+        if let Some(guard) = queue.prepare_read() {
+            let timeout = rustix::time::Timespec::try_from(left)?;
+            let ready = {
+                let fd = guard.connection_fd();
+                match poll(&mut [PollFd::new(&fd, PollFlags::IN)], Some(&timeout)) {
+                    Ok(n) => n > 0,
+                    Err(rustix::io::Errno::INTR) => false,
+                    Err(e) => return Err(e.into()),
+                }
+            };
+            if ready {
+                read_events(guard)?;
+            }
+        }
+        queue.dispatch_pending(&mut daemon)?;
+    }
+
     loop {
         queue.dispatch_pending(&mut daemon)?;
         conn.flush()?;
@@ -341,11 +374,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             (!fds[0].revents().is_empty(), !fds[1].revents().is_empty())
         };
         if wayland_ready {
-            match guard.read() {
-                Ok(_) => {}
-                Err(WaylandError::Io(e)) if e.kind() == io::ErrorKind::WouldBlock => {}
-                Err(e) => return Err(e.into()),
-            }
+            read_events(guard)?;
             // Serve requests against the newest window state.
             queue.dispatch_pending(&mut daemon)?;
         } else {
@@ -358,6 +387,15 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                 }
             }
         }
+    }
+}
+
+/// Reads whatever the compositor has sent; a spurious wakeup is not an error.
+fn read_events(guard: wayland_client::backend::ReadEventsGuard) -> Result<(), WaylandError> {
+    match guard.read() {
+        Ok(_) => Ok(()),
+        Err(WaylandError::Io(e)) if e.kind() == io::ErrorKind::WouldBlock => Ok(()),
+        Err(e) => Err(e),
     }
 }
 
@@ -399,6 +437,7 @@ impl Dispatch<ExtForeignToplevelListV1, ()> for Daemon {
                 activated: false,
                 minimized: false,
                 last_focus: 0,
+                state_known: false,
             });
         }
     }
@@ -483,5 +522,6 @@ impl Dispatch<ZcosmicToplevelHandleV1, ()> for Daemon {
         }
         state.windows[i].activated = activated;
         state.windows[i].minimized = flags.contains(&STATE_MINIMIZED);
+        state.windows[i].state_known = true;
     }
 }

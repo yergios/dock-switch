@@ -10,7 +10,7 @@ publish = false
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 wayland-scanner = "0.31"
-rustix = { version = "1", features = ["event"] }
+rustix = { version = "1", features = ["event", "fs", "time"] }
 
 [profile.release]
 opt-level = 3

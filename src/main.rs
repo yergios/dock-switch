@@ -103,8 +103,10 @@ fn start_daemon() -> Result<(), Box<dyn Error>> {
 }
 
 fn connect_with_retry(path: &PathBuf) -> Result<UnixStream, Box<dyn Error>> {
-    for _ in 0..50 {
-        std::thread::sleep(Duration::from_millis(20));
+    // The daemon binds within a few ms; once bound, the connection waits in
+    // its backlog until it is ready to serve, so polling often is cheap.
+    for _ in 0..500 {
+        std::thread::sleep(Duration::from_millis(2));
         if let Ok(s) = UnixStream::connect(path) {
             return Ok(s);
         }
