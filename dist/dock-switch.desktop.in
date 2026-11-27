@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=dock-switch
+Comment=Super+Number app switching daemon
+Exec=@BINDIR@/dock-switch daemon
+NoDisplay=true
