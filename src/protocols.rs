@@ -3,7 +3,12 @@
 //! The `cosmic-protocols` crate is avoided because it is GPL-3.0-only, while
 //! the XML files themselves carry permissive notices.
 
-#![allow(dead_code, non_camel_case_types, non_upper_case_globals, non_snake_case)]
+#![allow(
+    dead_code,
+    non_camel_case_types,
+    non_upper_case_globals,
+    non_snake_case
+)]
 #![allow(unused_imports, unused_unsafe, unused_variables, clippy::all)]
 
 // Only needed because the deprecated members of toplevel-info reference it.

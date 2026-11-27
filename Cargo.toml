@@ -3,6 +3,7 @@ name = "dock-switch"
 version = "0.1.0"
 edition = "2024"
 description = "Windows-style Super+Number app switching for the COSMIC desktop"
+license = "MIT"
 publish = false
 
 [dependencies]

@@ -97,7 +97,10 @@ impl Daemon {
         let resolve = |entries: &[DesktopEntry], fav: &str| {
             apps::find(entries, fav).map(|i| entries[i].id.clone())
         };
-        if favorites.iter().any(|f| resolve(&self.entries, f).is_none()) {
+        if favorites
+            .iter()
+            .any(|f| resolve(&self.entries, f).is_none())
+        {
             self.entries = apps::load_entries();
         }
         let pinned: Vec<String> = favorites
@@ -148,7 +151,9 @@ impl Daemon {
     }
 
     fn group_windows(&self, key: &str) -> Vec<usize> {
-        (0..self.windows.len()).filter(|&i| self.windows[i].group == key).collect()
+        (0..self.windows.len())
+            .filter(|&i| self.windows[i].group == key)
+            .collect()
     }
 
     fn focus(&self, idx: usize) {
@@ -188,7 +193,10 @@ impl Daemon {
         }
 
         // Without any focus history yet, the newest window wins the tie.
-        let target = group.iter().copied().max_by_key(|&i| self.windows[i].last_focus);
+        let target = group
+            .iter()
+            .copied()
+            .max_by_key(|&i| self.windows[i].last_focus);
         self.focus(target.expect("group is not empty"));
         Ok(String::new())
     }
@@ -215,7 +223,11 @@ impl Daemon {
     fn list(&self) -> String {
         let mut out = String::new();
         for (n, key) in self.slots().enumerate() {
-            let pin = if n < self.pinned.len() { "  (pinned)" } else { "" };
+            let pin = if n < self.pinned.len() {
+                "  (pinned)"
+            } else {
+                ""
+            };
             let _ = writeln!(out, "{}  {key}{pin}", n + 1);
             for &i in &self.group_windows(key) {
                 let w = &self.windows[i];

@@ -52,13 +52,14 @@ group by their raw app ID. Desktop entries come from `$XDG_DATA_HOME` then
 
 ## Design
 
-One binary, `dock-switch`, with four commands:
+One binary, `dock-switch`, with these commands:
 
 - `dock-switch daemon`: long-running process holding the window state
 - `dock-switch switch N`: asks the daemon to act on slot N (`last` for the
   last slot)
 - `dock-switch new N`: launches the app in slot N even if it is running
 - `dock-switch list`: prints the slots and their windows, for debugging
+- `dock-switch shortcuts [remove]`: adds or removes the COSMIC bindings
 
 **Why a daemon:** a one-shot command only sees the windows open right now.
 It cannot know the dock's history-dependent order of unpinned apps, or which
@@ -104,8 +105,11 @@ and `DBusActivatable` entries. The daemon reaps each launcher process.
 
 ## Files
 
-`make install` places the first two (override the location with `PREFIX=`);
-the shortcuts are edited by hand.
+`make install` places the first two (override the location with `PREFIX=`).
+`make shortcuts` (`dock-switch shortcuts`) adds the bindings below to the
+third, replacing only bindings on the same keys and keeping the rest verbatim;
+the file is renamed into place so COSMIC never reads it half written.
+`make uninstall` runs `dock-switch shortcuts remove` first.
 
 | Path | Purpose |
 |---|---|

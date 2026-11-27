@@ -4,6 +4,7 @@
 mod apps;
 mod daemon;
 mod protocols;
+mod shortcuts;
 
 use std::error::Error;
 use std::io::{Read, Write};
@@ -13,7 +14,8 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-const USAGE: &str = "usage: dock-switch daemon | switch <slot|last> | new <slot|last> | list\n";
+const USAGE: &str = "usage: dock-switch daemon | switch <slot|last> | new <slot|last> | list
+       dock-switch shortcuts [remove]\n";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -22,6 +24,8 @@ fn main() {
         ["daemon"] => daemon::run().map(|()| 0),
         [cmd @ ("switch" | "new"), slot] => request(&format!("{cmd} {slot}")),
         ["list"] => request("list"),
+        ["shortcuts"] => shortcuts::run(false).map(|()| 0),
+        ["shortcuts", "remove"] => shortcuts::run(true).map(|()| 0),
         _ => {
             eprint!("{USAGE}");
             Ok(2)
@@ -61,7 +65,10 @@ fn request(line: &str) -> Result<i32, Box<dyn Error>> {
         print!("{out}");
         Ok(0)
     } else {
-        eprint!("dock-switch: {}", reply.strip_prefix("err ").unwrap_or(&reply));
+        eprint!(
+            "dock-switch: {}",
+            reply.strip_prefix("err ").unwrap_or(&reply)
+        );
         Ok(1)
     }
 }

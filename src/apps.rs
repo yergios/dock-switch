@@ -32,7 +32,12 @@ pub fn load_entries() -> Vec<DesktopEntry> {
         .ok()
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| "/usr/local/share:/usr/share".into());
-    dirs.extend(data_dirs.split(':').filter(|d| !d.is_empty()).map(PathBuf::from));
+    dirs.extend(
+        data_dirs
+            .split(':')
+            .filter(|d| !d.is_empty())
+            .map(PathBuf::from),
+    );
 
     let mut entries = Vec::new();
     for dir in dirs {
@@ -79,7 +84,9 @@ fn parse_entry(path: &Path) -> Option<DesktopEntry> {
         if !in_main {
             continue;
         }
-        let Some((key, value)) = line.split_once('=') else { continue };
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
         let value = value.trim().to_string();
         match key.trim() {
             "Name" => entry.name = value,
@@ -107,7 +114,12 @@ pub fn find(entries: &[DesktopEntry], app_id: &str) -> Option<usize> {
         &|e| eq(&e.id, app_id) || eq(&e.id, last_part),
         &|e| eq(&e.name, app_id),
         &|e| eq(&e.exec, app_id),
-        &|e| e.exec.split_ascii_whitespace().next().is_some_and(|w| eq(w, app_id)),
+        &|e| {
+            e.exec
+                .split_ascii_whitespace()
+                .next()
+                .is_some_and(|w| eq(w, app_id))
+        },
     ];
     rules.iter().find_map(|rule| entries.iter().position(rule))
 }
@@ -125,7 +137,11 @@ pub fn load_favorites() -> Vec<String> {
 /// Extracts the strings of a RON list like `["a", "b",]`. App ids never
 /// contain quotes, so escapes are not handled.
 fn parse_string_list(text: &str) -> Vec<String> {
-    text.split('"').skip(1).step_by(2).map(str::to_string).collect()
+    text.split('"')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_string)
+        .collect()
 }
 
 #[cfg(test)]
@@ -145,9 +161,24 @@ mod tests {
     #[test]
     fn matches_like_the_dock() {
         let entries = [
-            entry("com.anthropic.Claude", "Claude", "claude-desktop %U", "com.anthropic.Claude"),
-            entry("app.zen_browser.zen", "Zen Browser", "/usr/bin/flatpak run app.zen_browser.zen", "zen"),
-            entry("bitwarden", "Bitwarden", "/opt/Bitwarden/bitwarden %U", "Bitwarden"),
+            entry(
+                "com.anthropic.Claude",
+                "Claude",
+                "claude-desktop %U",
+                "com.anthropic.Claude",
+            ),
+            entry(
+                "app.zen_browser.zen",
+                "Zen Browser",
+                "/usr/bin/flatpak run app.zen_browser.zen",
+                "zen",
+            ),
+            entry(
+                "bitwarden",
+                "Bitwarden",
+                "/opt/Bitwarden/bitwarden %U",
+                "Bitwarden",
+            ),
             entry("org.gnome.Calculator", "Calculator", "gnome-calculator", ""),
             entry("foo", "Foo", "foo", ""),
         ];
@@ -165,7 +196,10 @@ mod tests {
     #[test]
     fn parses_favorites() {
         let text = "[\n    \"com.system76.CosmicFiles\",\n    \"Claude\",\n]";
-        assert_eq!(parse_string_list(text), ["com.system76.CosmicFiles", "Claude"]);
+        assert_eq!(
+            parse_string_list(text),
+            ["com.system76.CosmicFiles", "Claude"]
+        );
         assert!(parse_string_list("").is_empty());
     }
 }
