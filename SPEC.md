@@ -49,7 +49,10 @@ and taking the first hit in this order:
 4. `Exec` equals the app ID, then `Exec`'s first word equals it
 
 Pin strings are matched with the same rule. Windows with no matching entry
-group by their raw app ID. Desktop entries come from `$XDG_DATA_HOME` then
+group by their raw app ID, and all windows without an app ID form a single
+group, as in the dock. A window whose app ID changes to empty stays in its
+group. When two pins resolve to the same entry, only the first slot gets its
+windows; the other acts as a launcher. Desktop entries come from `$XDG_DATA_HOME` then
 `$XDG_DATA_DIRS` (absolute entries only), each under `applications/`, earlier
 directories winning. Each directory lists its files in sorted order, then its
 subdirectories in reverse sorted order, as the dock's library does; directory

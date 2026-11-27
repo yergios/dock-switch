@@ -38,9 +38,9 @@ struct Window {
     app_id: String,
     /// The app id `group` was computed from.
     grouped_app_id: String,
-    /// Desktop entry id, or the raw app id when no entry matches. Empty until
+    /// Desktop entry id, or the raw app id when no entry matches; None until
     /// the first `done`.
-    group: String,
+    group: Option<String>,
     activated: bool,
     minimized: bool,
     /// Value of `Daemon::focus_clock` when the window last gained focus.
@@ -68,7 +68,6 @@ struct Daemon {
     /// Running groups that are not pinned, in dock order.
     running: Vec<String>,
     focus_clock: u64,
-    unknown_apps: u32,
     seat: WlSeat,
     manager: ZcosmicToplevelManagerV1,
     info: ZcosmicToplevelInfoV1,
@@ -77,9 +76,9 @@ struct Daemon {
 impl Daemon {
     fn group_key(&mut self, app_id: &str) -> String {
         if app_id.is_empty() {
-            // The dock shows each of these as its own "Unknown Application".
-            self.unknown_apps += 1;
-            return format!("unknown-{}", self.unknown_apps);
+            // The dock gives such windows a placeholder entry with an empty
+            // id, and later ones find that entry, so they share one group.
+            return String::new();
         }
         if apps::find(&self.entries, app_id).is_none() {
             // The app may have been installed after we loaded the entries.
@@ -104,7 +103,7 @@ impl Daemon {
     }
 
     fn has_windows(&self, key: &str) -> bool {
-        self.windows.iter().any(|w| w.group == key)
+        self.windows.iter().any(|w| w.group.as_deref() == Some(key))
     }
 
     /// Re-reads the dock's pins and applies them if they changed.
@@ -145,7 +144,7 @@ impl Daemon {
     }
 
     fn forget_group_if_empty(&mut self, key: &str) {
-        if !key.is_empty() && !self.has_windows(key) {
+        if !self.has_windows(key) {
             self.running.retain(|k| k != key);
         }
     }
@@ -154,11 +153,13 @@ impl Daemon {
         let app_id = self.windows[idx].app_id.clone();
         let key = self.group_key(&app_id);
         self.windows[idx].grouped_app_id = app_id;
-        let old = std::mem::replace(&mut self.windows[idx].group, key.clone());
-        if old == key {
+        let old = self.windows[idx].group.replace(key.clone());
+        if old.as_ref() == Some(&key) {
             return;
         }
-        self.forget_group_if_empty(&old);
+        if let Some(old) = old {
+            self.forget_group_if_empty(&old);
+        }
         self.reload_favorites();
         if !self.pinned.contains(&key) && !self.running.contains(&key) {
             self.running.push(key);
@@ -169,16 +170,23 @@ impl Daemon {
         let w = self.windows.remove(idx);
         w.cosmic.destroy();
         w.foreign.destroy();
-        self.forget_group_if_empty(&w.group);
+        if let Some(group) = &w.group {
+            self.forget_group_if_empty(group);
+        }
     }
 
     fn slots(&self) -> impl Iterator<Item = &String> {
         self.pinned.iter().chain(&self.running)
     }
 
-    fn group_windows(&self, key: &str) -> Vec<usize> {
+    /// Windows shown under the slot at `index` (0-based). When two pins
+    /// resolve to the same entry, the dock gives the windows to the first.
+    fn slot_windows(&self, index: usize, key: &str) -> Vec<usize> {
+        if self.slots().position(|k| k == key) != Some(index) {
+            return Vec::new();
+        }
         (0..self.windows.len())
-            .filter(|&i| self.windows[i].group == key)
+            .filter(|&i| self.windows[i].group.as_deref() == Some(key))
             .collect()
     }
 
@@ -190,25 +198,27 @@ impl Daemon {
         self.manager.activate(&w.cosmic, &self.seat);
     }
 
-    /// Group key of a 1-based slot; `None` means the last slot.
-    fn slot_key(&mut self, slot: Option<usize>) -> Result<String, String> {
+    /// 0-based index and group key of a 1-based slot; `None` means the last.
+    fn slot_key(&mut self, slot: Option<usize>) -> Result<(usize, String), String> {
         self.reload_favorites();
         // Resolved after the reload, since a pin change can move the last slot.
         let slot = slot.unwrap_or_else(|| self.slots().count());
-        let key_at = |d: &Self| d.slots().nth(slot.wrapping_sub(1)).cloned();
+        let index = slot.wrapping_sub(1);
+        let key_at = |d: &Self| d.slots().nth(index).cloned();
         let key = key_at(self).ok_or_else(|| format!("no app in slot {slot}"))?;
         // A pin with no entry and no windows may be an app installed since
         // the last scan; a rescan re-resolves the pins.
         if !self.has_windows(&key) && !self.entries.iter().any(|e| e.id == key) {
             self.refresh_entries();
-            return key_at(self).ok_or_else(|| format!("no app in slot {slot}"));
+            let key = key_at(self).ok_or_else(|| format!("no app in slot {slot}"))?;
+            return Ok((index, key));
         }
-        Ok(key)
+        Ok((index, key))
     }
 
     fn switch(&mut self, slot: Option<usize>) -> Result<Reply, String> {
-        let key = self.slot_key(slot)?;
-        let group = self.group_windows(&key);
+        let (index, key) = self.slot_key(slot)?;
+        let group = self.slot_windows(index, &key);
         if group.is_empty() {
             return self.launch(&key);
         }
@@ -258,8 +268,9 @@ impl Daemon {
             } else {
                 ""
             };
-            let _ = writeln!(out, "{}  {}{pin}", n + 1, printable(key));
-            for &i in &self.group_windows(key) {
+            let name = if key.is_empty() { "(no app id)" } else { key };
+            let _ = writeln!(out, "{}  {}{pin}", n + 1, printable(name));
+            for &i in &self.slot_windows(n, key) {
                 let w = &self.windows[i];
                 let mark = match (w.activated && !w.minimized, w.minimized) {
                     (true, _) => "focused  ",
@@ -288,7 +299,7 @@ impl Daemon {
                     "switch" => self.switch(slot),
                     // Whether a second launch opens a new window is up to the
                     // app; single-instance apps may just raise their window.
-                    _ => self.slot_key(slot).and_then(|key| self.launch(&key)),
+                    _ => self.slot_key(slot).and_then(|(_, key)| self.launch(&key)),
                 })
             }
             ["list"] => Ok(Reply::Output(self.list())),
@@ -340,7 +351,6 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         pinned: Vec::new(),
         running: Vec::new(),
         focus_clock: 0,
-        unknown_apps: 0,
         seat,
         manager,
         info,
@@ -507,7 +517,7 @@ impl Dispatch<ExtForeignToplevelListV1, ()> for Daemon {
                 title: String::new(),
                 app_id: String::new(),
                 grouped_app_id: String::new(),
-                group: String::new(),
+                group: None,
                 activated: false,
                 minimized: false,
                 last_focus: 0,
@@ -539,7 +549,10 @@ impl Dispatch<ExtForeignToplevelHandleV1, ()> for Daemon {
             Event::AppId { app_id } => state.windows[i].app_id = app_id,
             Event::Done => {
                 let w = &state.windows[i];
-                if w.group.is_empty() || w.app_id != w.grouped_app_id {
+                // The dock ignores a change to an empty app id, keeping the
+                // window where it was.
+                let changed = !w.app_id.is_empty() && w.app_id != w.grouped_app_id;
+                if w.group.is_none() || changed {
                     state.assign_group(i);
                 }
             }
