@@ -1,17 +1,25 @@
 //! Desktop entries and dock pins, matched the way the COSMIC dock does it, so
 //! our slot numbers agree with what the dock shows.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 pub struct DesktopEntry {
-    /// File stem, e.g. `com.mitchellh.ghostty`.
+    /// Desktop file id: the path below `applications/` with `/` turned into
+    /// `-`, minus `.desktop`, e.g. `wine-Programs-Steam`.
     pub id: String,
+    /// File name minus `.desktop`, which the dock also matches on.
+    stem: String,
     pub path: PathBuf,
     name: String,
     exec: String,
     wm_class: String,
 }
+
+/// Real desktop files are a few KiB even with many translations; anything far
+/// bigger is not one and is not worth reading.
+const MAX_ENTRY_SIZE: u64 = 1 << 20;
 
 fn home() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
@@ -32,42 +40,68 @@ pub fn load_entries() -> Vec<DesktopEntry> {
         .ok()
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| "/usr/local/share:/usr/share".into());
+    // The XDG base directory spec says relative entries are to be ignored.
     dirs.extend(
         data_dirs
             .split(':')
-            .filter(|d| !d.is_empty())
-            .map(PathBuf::from),
+            .map(PathBuf::from)
+            .filter(|d| d.is_absolute()),
     );
 
     let mut entries = Vec::new();
+    let mut visited = HashSet::new();
     for dir in dirs {
-        collect(&dir.join("applications"), &mut entries, 0);
+        collect(&dir.join("applications"), &mut entries, &mut visited);
     }
     entries
 }
 
-fn collect(dir: &Path, out: &mut Vec<DesktopEntry>, depth: u32) {
-    let Ok(read) = fs::read_dir(dir) else { return };
-    // Sorted so ties between entries resolve the same way on every run.
+/// Walks the way the dock's library does, since the first match wins and
+/// order decides ties: a directory's files in sorted order, then its
+/// subdirectories in reverse sorted order. Directories are followed through
+/// symlinks but each is visited once, which also stops symlink loops.
+fn collect(dir: &Path, out: &mut Vec<DesktopEntry>, visited: &mut HashSet<PathBuf>) {
+    let Ok(dir) = dir.canonicalize() else { return };
+    if !visited.insert(dir.clone()) {
+        return;
+    }
+    let Ok(read) = fs::read_dir(&dir) else { return };
     let mut paths: Vec<PathBuf> = read.filter_map(|e| e.ok().map(|e| e.path())).collect();
     paths.sort();
+    let mut subdirs = Vec::new();
     for path in paths {
-        if path.is_dir() {
-            if depth < 4 {
-                collect(&path, out, depth + 1);
-            }
-        } else if path.extension().is_some_and(|e| e == "desktop")
+        let Ok(meta) = fs::metadata(&path) else {
+            continue;
+        };
+        if meta.is_dir() {
+            subdirs.push(path);
+        } else if meta.is_file()
+            && meta.len() <= MAX_ENTRY_SIZE
+            && path.extension().is_some_and(|e| e == "desktop")
             && let Some(entry) = parse_entry(&path)
         {
             out.push(entry);
         }
     }
+    for sub in subdirs.iter().rev() {
+        collect(sub, out, visited);
+    }
+}
+
+/// Desktop file id per the desktop entry spec, as the dock computes it.
+fn entry_id(path: &Path) -> Option<String> {
+    let path = path.to_str()?.strip_suffix(".desktop")?;
+    Some(match path.rsplit_once("/applications/") {
+        Some((_, rel)) => rel.replace('/', "-"),
+        None => path.rsplit('/').next()?.to_string(),
+    })
 }
 
 fn parse_entry(path: &Path) -> Option<DesktopEntry> {
     let text = fs::read_to_string(path).ok()?;
     let mut entry = DesktopEntry {
-        id: path.file_stem()?.to_str()?.to_string(),
+        id: entry_id(path)?,
+        stem: path.file_stem()?.to_str()?.to_string(),
         path: path.to_path_buf(),
         name: String::new(),
         exec: String::new(),
@@ -87,13 +121,14 @@ fn parse_entry(path: &Path) -> Option<DesktopEntry> {
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
-        let value = value.trim().to_string();
-        match key.trim() {
-            "Name" => entry.name = value,
-            "Exec" => entry.exec = value,
-            "StartupWMClass" => entry.wm_class = value,
-            _ => {}
-        }
+        // Most lines are translations; only these three are kept.
+        let field = match key.trim() {
+            "Name" => &mut entry.name,
+            "Exec" => &mut entry.exec,
+            "StartupWMClass" => &mut entry.wm_class,
+            _ => continue,
+        };
+        *field = value.trim().to_string();
     }
     Some(entry)
 }
@@ -111,7 +146,7 @@ pub fn find(entries: &[DesktopEntry], app_id: &str) -> Option<usize> {
     let last_part = app_id.rsplit('.').next().unwrap_or(app_id);
     let rules: [&dyn Fn(&DesktopEntry) -> bool; 5] = [
         &|e| eq(&e.wm_class, app_id),
-        &|e| eq(&e.id, app_id) || eq(&e.id, last_part),
+        &|e| eq(&e.id, app_id) || eq(&e.stem, app_id) || eq(&e.stem, last_part),
         &|e| eq(&e.name, app_id),
         &|e| eq(&e.exec, app_id),
         &|e| {
@@ -151,6 +186,7 @@ mod tests {
     fn entry(id: &str, name: &str, exec: &str, wm_class: &str) -> DesktopEntry {
         DesktopEntry {
             id: id.into(),
+            stem: id.into(),
             path: PathBuf::new(),
             name: name.into(),
             exec: exec.into(),
@@ -191,6 +227,40 @@ mod tests {
         assert_eq!(find(&entries, "org.example.foo"), Some(4)); // by last id part
         assert_eq!(find(&entries, "nope"), None);
         assert_eq!(find(&entries, ""), None);
+    }
+
+    #[test]
+    fn scans_like_the_dock() {
+        let root = std::env::temp_dir().join(format!("dock-switch-scan-{}", std::process::id()));
+        let apps = root.join("applications");
+        for dir in ["a", "wine/Programs", "zz"] {
+            fs::create_dir_all(apps.join(dir)).unwrap();
+        }
+        let desktop = "[Desktop Entry]\nName=X\n";
+        for file in ["b", "a/z", "wine/Programs/Steam", "zz/y"] {
+            fs::write(apps.join(format!("{file}.desktop")), desktop).unwrap();
+        }
+        let big = fs::File::create(apps.join("big.desktop")).unwrap();
+        big.set_len(MAX_ENTRY_SIZE + 1).unwrap();
+        std::os::unix::fs::symlink(&apps, apps.join("loop")).unwrap();
+
+        let mut out = Vec::new();
+        collect(&apps, &mut out, &mut HashSet::new());
+        let ids: Vec<&str> = out.iter().map(|e| e.id.as_str()).collect();
+        fs::remove_dir_all(&root).unwrap();
+
+        // Files first, then subdirectories in reverse order; the oversized
+        // file and the symlink back to the root are skipped.
+        assert_eq!(ids, ["b", "zz-y", "wine-Programs-Steam", "a-z"]);
+        let entries = out;
+        assert_eq!(
+            find(&entries, "steam").map(|i| entries[i].id.as_str()),
+            Some("wine-Programs-Steam")
+        );
+        assert_eq!(
+            find(&entries, "wine-programs-steam").map(|i| entries[i].id.as_str()),
+            Some("wine-Programs-Steam")
+        );
     }
 
     #[test]

@@ -41,14 +41,19 @@ desktop entry the same way the dock does it, comparing ASCII case-insensitively
 and taking the first hit in this order:
 
 1. `StartupWMClass` equals the app ID
-2. The desktop id (file stem) equals the app ID, or equals the app ID's
-   last dot-separated part
+2. The desktop file id equals the app ID, or the file stem equals the app
+   ID or its last dot-separated part. The id is the path below
+   `applications/` with `/` turned into `-` (`wine/Programs/Steam.desktop`
+   is `wine-Programs-Steam`); for top-level files it is the stem.
 3. `Name` equals the app ID
 4. `Exec` equals the app ID, then `Exec`'s first word equals it
 
 Pin strings are matched with the same rule. Windows with no matching entry
 group by their raw app ID. Desktop entries come from `$XDG_DATA_HOME` then
-`$XDG_DATA_DIRS`, each under `applications/`, earlier directories winning.
+`$XDG_DATA_DIRS` (absolute entries only), each under `applications/`, earlier
+directories winning. Each directory lists its files in sorted order, then its
+subdirectories in reverse sorted order, as the dock's library does; directory
+symlinks are followed once each. Only regular files up to 1 MiB are read.
 
 ## Design
 
