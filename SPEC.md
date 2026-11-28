@@ -145,6 +145,9 @@ location if it is a symlink. The first run that changes it saves the original
 as `custom.before-dock-switch` (never overwritten). Files with RON comments are
 refused, since the splitter does not parse them. COSMIC runs `Spawn` through
 `/bin/sh -c`, so the binary path must consist of letters, digits and `/._+-`.
+A binary under `$HOME` is written as `~/...`, which the shell expands without
+splitting, so the file names no user and can live in dotfiles; only the part
+after `~` must be that plain. Elsewhere the absolute path is written.
 `make uninstall` runs `dock-switch shortcuts remove` first; with no shortcuts
 file it does nothing.
 

@@ -35,9 +35,28 @@ fn check_path(exe: &str) -> Result<(), String> {
     }
 }
 
+/// The binary as the shortcuts name it: `~/...` when it is under the home
+/// directory, so the file holds no username and works for any user (handy in
+/// dotfiles), else the absolute path. The shell expands a leading `~` from
+/// HOME and never splits the result, so only the part after it has to pass
+/// `check_path`.
+fn command_path(exe: &str, home: &str) -> Result<String, String> {
+    let home = home.trim_end_matches('/');
+    match exe.strip_prefix(home) {
+        Some(rest) if !home.is_empty() && rest.starts_with('/') => {
+            check_path(rest)?;
+            Ok(format!("~{rest}"))
+        }
+        _ => {
+            check_path(exe)?;
+            Ok(exe.to_string())
+        }
+    }
+}
+
 /// Every binding we own. `Super+0` means the last slot, and the workspace
-/// shortcuts we displace move to `Ctrl` variants of the same keys. `exe` must
-/// have passed `check_path`.
+/// shortcuts we displace move to `Ctrl` variants of the same keys. `exe` comes
+/// from `command_path`.
 fn wanted(exe: &str) -> Vec<Shortcut> {
     let mut out = Vec::new();
     for key in DIGITS {
@@ -258,8 +277,8 @@ fn custom_path() -> PathBuf {
 pub fn run(remove: bool) -> Result<(), Box<dyn Error>> {
     let exe = std::env::current_exe()?;
     let exe = exe.to_str().ok_or("binary path is not UTF-8")?;
-    check_path(exe)?;
-    let wanted = wanted(exe);
+    let exe = command_path(exe, &std::env::var("HOME").unwrap_or_default())?;
+    let wanted = wanted(&exe);
 
     // Through a symlink (a dotfiles manager, say) to the real file, so the
     // rename below replaces the file rather than the link.
@@ -411,5 +430,35 @@ mod tests {
         assert!(check_path("/home/o'brien/bin/dock-switch").is_err());
         assert!(check_path("/tmp/x$(id)/dock-switch").is_err());
         assert!(check_path("/a b/dock-switch").is_err());
+    }
+
+    #[test]
+    fn names_the_binary_relative_to_home() {
+        let exe = "/home/syl/.local/bin/dock-switch";
+        assert_eq!(
+            command_path(exe, "/home/syl").unwrap(),
+            "~/.local/bin/dock-switch"
+        );
+        assert_eq!(
+            command_path(exe, "/home/syl/").unwrap(),
+            "~/.local/bin/dock-switch"
+        );
+        // Not under home, or only sharing a prefix with it: absolute.
+        assert_eq!(
+            command_path("/usr/local/bin/dock-switch", "/home/syl").unwrap(),
+            "/usr/local/bin/dock-switch"
+        );
+        assert_eq!(
+            command_path("/home/sylvia/bin/dock-switch", "/home/syl").unwrap(),
+            "/home/sylvia/bin/dock-switch"
+        );
+        assert_eq!(command_path(exe, "").unwrap(), exe);
+        assert_eq!(command_path(exe, "/").unwrap(), exe);
+        // The home part may hold anything; the rest must still be plain.
+        assert_eq!(
+            command_path("/home/o'b/bin/dock-switch", "/home/o'b").unwrap(),
+            "~/bin/dock-switch"
+        );
+        assert!(command_path("/home/syl/my bin/dock-switch", "/home/syl").is_err());
     }
 }
