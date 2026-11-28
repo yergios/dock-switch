@@ -171,7 +171,8 @@ Shortcut changes:
 ## Dependencies
 
 `wayland-client`, `wayland-protocols` (staging), `wayland-scanner`, and
-`rustix` (already pulled in by `wayland-client`; used directly for `poll`).
+`rustix` (already pulled in by `wayland-client`; used directly for `poll`,
+`flock` and inotify).
 
 ## Out of scope
 

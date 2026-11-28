@@ -10,7 +10,7 @@ use std::error::Error;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -40,7 +40,7 @@ fn main() {
     }
 }
 
-pub fn socket_path() -> Result<PathBuf, String> {
+fn socket_path() -> Result<PathBuf, String> {
     std::env::var_os("XDG_RUNTIME_DIR")
         .map(|dir| PathBuf::from(dir).join("dock-switch.sock"))
         .ok_or_else(|| "XDG_RUNTIME_DIR is not set".to_string())
@@ -102,7 +102,7 @@ fn start_daemon() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn connect_with_retry(path: &PathBuf) -> Result<UnixStream, Box<dyn Error>> {
+fn connect_with_retry(path: &Path) -> Result<UnixStream, Box<dyn Error>> {
     // The daemon binds within a few ms; once bound, the connection waits in
     // its backlog until it is ready to serve, so polling often is cheap.
     for _ in 0..500 {

@@ -6,6 +6,7 @@
 //! compare (modifiers and key) are read; everything else is kept verbatim.
 
 use std::error::Error;
+use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -91,13 +92,13 @@ fn wanted(exe: &str) -> Vec<Shortcut> {
 fn format_shortcut(s: &Shortcut) -> String {
     let mut out = String::from("    (\n        modifiers: [\n");
     for m in s.modifiers {
-        out.push_str(&format!("            {m},\n"));
+        let _ = writeln!(out, "            {m},");
     }
-    out.push_str(&format!("        ],\n        key: \"{}\",\n", s.key));
+    let _ = writeln!(out, "        ],\n        key: \"{}\",", s.key);
     if let Some(d) = &s.description {
-        out.push_str(&format!("        description: Some(\"{d}\"),\n"));
+        let _ = writeln!(out, "        description: Some(\"{d}\"),");
     }
-    out.push_str(&format!("    ): {},\n", s.action));
+    let _ = writeln!(out, "    ): {},", s.action);
     out
 }
 

@@ -1,5 +1,5 @@
 //! The long-running process: tracks windows over Wayland, keeps the dock's
-//! slot order and focus history, and serves `switch`/`list` requests.
+//! slot order and focus history, and serves `switch`/`new`/`list` requests.
 
 use std::error::Error;
 use std::fmt::Write as _;
@@ -89,10 +89,8 @@ impl Daemon {
         found.map_or_else(|| app_id.to_string(), |i| self.entries[i].id.clone())
     }
 
-    /// Rescans desktop entries if any scanned directory changed. Unmatched
-    /// app ids would otherwise cost a full scan each (any app can pick one),
-    /// so the check is a few stats. Pins are re-resolved afterwards, since a
-    /// pin whose app was missing may now have an entry.
+    /// Rescans desktop entries if a scanned directory changed, then
+    /// re-resolves pins, since a pin whose app was missing may now have one.
     fn refresh_entries(&mut self) {
         if !self.entries_stamp.changed() {
             return;
@@ -255,11 +253,9 @@ impl Daemon {
         Ok(Reply::Done)
     }
 
-    /// Tells the client which desktop file to run. The client runs it, not
-    /// the daemon: COSMIC starts the client fresh for each keypress with the
-    /// session's environment, while the daemon may have inherited a
-    /// terminal's (variables, secrets, working directory) when a command
-    /// started it, and launched apps would inherit that in turn.
+    /// Tells the client which desktop file to run; the client runs it so the
+    /// app gets the keypress's environment, not the daemon's (see SPEC.md,
+    /// Launching).
     fn launch(&self, key: &str) -> Result<Reply, String> {
         let entry = self
             .entries
@@ -309,7 +305,10 @@ impl Daemon {
             ["new", n] => parse_slot(n)
                 .and_then(|slot| self.slot_key(slot))
                 .and_then(|(_, key)| self.launch(&key)),
-            ["list"] => Ok(Reply::Output(self.list())),
+            ["list"] => {
+                self.reload_favorites();
+                Ok(Reply::Output(self.list()))
+            }
             _ => Err(format!("unknown request '{}'", line.trim())),
         };
         let text = match reply {
