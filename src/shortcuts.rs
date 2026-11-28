@@ -40,16 +40,19 @@ fn check_path(exe: &str) -> Result<(), String> {
 fn wanted(exe: &str) -> Vec<Shortcut> {
     let mut out = Vec::new();
     for key in DIGITS {
-        let (slot, app) = match key {
-            "0" => ("last", "last dock app".to_string()),
-            n => (n, format!("dock app {n}")),
-        };
-        let (workspace, move_to) = match key {
+        let (slot, app, workspace, move_to) = match key {
             "0" => (
+                "last",
+                "last dock app".to_string(),
                 "LastWorkspace".to_string(),
                 "MoveToLastWorkspace".to_string(),
             ),
-            n => (format!("Workspace({n})"), format!("MoveToWorkspace({n})")),
+            n => (
+                n,
+                format!("dock app {n}"),
+                format!("Workspace({n})"),
+                format!("MoveToWorkspace({n})"),
+            ),
         };
         out.push(Shortcut {
             modifiers: &["Super"],
@@ -110,31 +113,19 @@ fn split_entries(text: &str) -> Result<(&str, Vec<&str>), String> {
         .find('{')
         .ok_or("shortcuts file does not start with '{'")?;
     let (header, body) = (&text[..open], &text[open + 1..]);
-    let (mut depth, mut in_str, mut escaped) = (0i32, false, false);
-    let (mut start, mut entries) = (0, Vec::new());
-    for (i, c) in body.char_indices() {
-        if in_str {
-            match c {
-                _ if escaped => escaped = false,
-                '\\' => escaped = true,
-                '"' => in_str = false,
-                _ => {}
-            }
-            continue;
-        }
+    let (mut depth, mut start, mut entries) = (0, 0, Vec::new());
+    for (i, c) in outside_strings(body) {
         match c {
-            '"' => in_str = true,
             '/' if body[i..].starts_with("//") || body[i..].starts_with("/*") => {
                 return Err("comments in the shortcuts file are not supported".into());
             }
-            '(' | '[' | '{' => depth += 1,
-            ')' | ']' => depth -= 1,
             '}' if depth == 0 => {
                 entries.push(body[start..i].trim());
                 entries.retain(|e| !e.is_empty());
                 return Ok((header, entries));
             }
-            '}' => depth -= 1,
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
             ',' if depth == 0 => {
                 entries.push(body[start..i].trim());
                 start = i + 1;
@@ -145,23 +136,30 @@ fn split_entries(text: &str) -> Result<(&str, Vec<&str>), String> {
     Err("shortcuts file has no closing '}'".into())
 }
 
+/// The characters of `text` outside RON strings (the quotes count as part
+/// of the string), with their byte offsets.
+fn outside_strings(text: &str) -> impl Iterator<Item = (usize, char)> {
+    let (mut in_str, mut escaped) = (false, false);
+    text.char_indices().filter(move |&(_, c)| {
+        if !in_str {
+            in_str = c == '"';
+            return !in_str;
+        }
+        match c {
+            _ if escaped => escaped = false,
+            '\\' => escaped = true,
+            '"' => in_str = false,
+            _ => {}
+        }
+        false
+    })
+}
+
 /// Splits an entry into its binding `( ... )` and the action after the colon.
 fn split_entry(entry: &str) -> Option<(&str, &str)> {
     let mut depth = 0;
-    let mut in_str = false;
-    let mut escaped = false;
-    for (i, c) in entry.char_indices() {
-        if in_str {
-            match c {
-                _ if escaped => escaped = false,
-                '\\' => escaped = true,
-                '"' => in_str = false,
-                _ => {}
-            }
-            continue;
-        }
+    for (i, c) in outside_strings(entry) {
         match c {
-            '"' => in_str = true,
             '(' | '[' => depth += 1,
             ')' | ']' => {
                 depth -= 1;
@@ -244,20 +242,16 @@ fn apply(text: &str, wanted: &[Shortcut], remove: bool) -> Result<(String, Vec<S
         out.push_str(&format!("    {entry},\n"));
     }
     if !remove {
-        wanted
-            .iter()
-            .for_each(|s| out.push_str(&format_shortcut(s)));
+        for s in wanted {
+            out.push_str(&format_shortcut(s));
+        }
     }
     out.push_str("}\n");
     Ok((out, replaced))
 }
 
 fn custom_path() -> PathBuf {
-    let config = match std::env::var_os("XDG_CONFIG_HOME") {
-        Some(v) if !v.is_empty() => PathBuf::from(v),
-        _ => PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config"),
-    };
-    config.join("cosmic/com.system76.CosmicSettings.Shortcuts/v1/custom")
+    crate::apps::config_home().join("cosmic/com.system76.CosmicSettings.Shortcuts/v1/custom")
 }
 
 pub fn run(remove: bool) -> Result<(), Box<dyn Error>> {

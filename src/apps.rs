@@ -185,9 +185,13 @@ pub fn find(entries: &[DesktopEntry], app_id: &str) -> Option<usize> {
 
 const FAVORITES_DIR: &str = "cosmic/com.system76.CosmicAppList/v1";
 
+pub fn config_home() -> PathBuf {
+    env_dir("XDG_CONFIG_HOME", || home().join(".config"))
+}
+
 /// Where cosmic-config keeps the user's dock settings, favorites included.
 pub fn favorites_dir() -> PathBuf {
-    env_dir("XDG_CONFIG_HOME", || home().join(".config")).join(FAVORITES_DIR)
+    config_home().join(FAVORITES_DIR)
 }
 
 /// The dock's pinned app list, as stored by cosmic-config, falling back to
