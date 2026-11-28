@@ -179,6 +179,14 @@ Shortcut changes:
 - Matching the dock's order after the daemon restarts mid-session: it rebuilds
   the unpinned order from the compositor's current window order, which can
   differ if pins changed earlier in the session
+- The dock's `filter_top_levels` setting (only windows of the current
+  workspace or output), which changes which running apps it shows; slots
+  assume the default of showing all
+- The dock's stricter idea of focus (activated and on the active workspace
+  and output); "activated" alone is used here
+- Desktop file decoding details of the dock's library: it drops entries with
+  invalid escapes or malformed lines, and decodes `\s` and friends, which
+  this parser does not
 - Multi-seat setups
 
 ## Testing
