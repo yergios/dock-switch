@@ -183,12 +183,24 @@ pub fn find(entries: &[DesktopEntry], app_id: &str) -> Option<usize> {
     rules.iter().find_map(|rule| entries.iter().position(rule))
 }
 
-/// The dock's pinned app list, as stored by cosmic-config.
+const FAVORITES_DIR: &str = "cosmic/com.system76.CosmicAppList/v1";
+
+/// Where cosmic-config keeps the user's dock settings, favorites included.
+pub fn favorites_dir() -> PathBuf {
+    env_dir("XDG_CONFIG_HOME", || home().join(".config")).join(FAVORITES_DIR)
+}
+
+/// The dock's pinned app list, as stored by cosmic-config, falling back to
+/// the system default like cosmic-config does.
 pub fn load_favorites() -> Vec<String> {
-    let rel = "cosmic/com.system76.CosmicAppList/v1/favorites";
-    let user = env_dir("XDG_CONFIG_HOME", || home().join(".config")).join(rel);
-    let text = fs::read_to_string(user)
-        .or_else(|_| fs::read_to_string(Path::new("/usr/share").join(rel)))
+    let text = fs::read_to_string(favorites_dir().join("favorites"))
+        .or_else(|_| {
+            fs::read_to_string(
+                Path::new("/usr/share")
+                    .join(FAVORITES_DIR)
+                    .join("favorites"),
+            )
+        })
         .unwrap_or_default();
     parse_string_list(&text)
 }

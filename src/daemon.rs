@@ -386,25 +386,41 @@ pub fn run() -> Result<(), Box<dyn Error>> {
         queue.dispatch_pending(&mut daemon)?;
     }
 
+    // Pins can change and change back between two requests; the dock applies
+    // each change, so a watch keeps our order in step. Without one (no user
+    // config directory yet), pins are still re-read on every request.
+    let favorites_watch = watch_favorites();
+
     loop {
         queue.dispatch_pending(&mut daemon)?;
         flush(&conn)?;
         let Some(guard) = queue.prepare_read() else {
             continue;
         };
-        let (wayland_ready, client_ready) = {
+        let (wayland_ready, client_ready, favorites_changed) = {
             let fd = guard.connection_fd();
-            let mut fds = [
+            let mut fds = vec![
                 PollFd::new(&fd, PollFlags::IN),
                 PollFd::new(&listener, PollFlags::IN),
             ];
+            if let Some(watch) = &favorites_watch {
+                fds.push(PollFd::new(watch, PollFlags::IN));
+            }
             match poll(&mut fds, None) {
                 Ok(_) => {}
                 Err(rustix::io::Errno::INTR) => continue,
                 Err(e) => return Err(e.into()),
             }
-            (!fds[0].revents().is_empty(), !fds[1].revents().is_empty())
+            let ready = |i: usize| fds.get(i).is_some_and(|f| !f.revents().is_empty());
+            (ready(0), ready(1), ready(2))
         };
+        if favorites_changed && let Some(watch) = &favorites_watch {
+            // The events only say something changed; read them all, then the
+            // file itself.
+            let mut buf = [0u8; 4096];
+            while rustix::io::read(watch, &mut buf).is_ok_and(|n| n > 0) {}
+            daemon.reload_favorites();
+        }
         if wayland_ready {
             read_events(guard)?;
             // Serve requests against the newest window state.
@@ -425,6 +441,17 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             }
         }
     }
+}
+
+/// Watches the dock's settings directory: cosmic-config may rewrite the
+/// favorites file in place or replace it, so both are covered.
+fn watch_favorites() -> Option<rustix::fd::OwnedFd> {
+    use rustix::fs::inotify::{self, CreateFlags, WatchFlags};
+    let fd = inotify::init(CreateFlags::CLOEXEC | CreateFlags::NONBLOCK).ok()?;
+    let events =
+        WatchFlags::CLOSE_WRITE | WatchFlags::MOVED_TO | WatchFlags::CREATE | WatchFlags::DELETE;
+    inotify::add_watch(&fd, apps::favorites_dir(), events).ok()?;
+    Some(fd)
 }
 
 /// Longest valid request is `switch <number>`; anything near this is garbage.

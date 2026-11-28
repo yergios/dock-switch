@@ -120,8 +120,11 @@ the old daemon instead of starting the new one.
 - One daemon per user: it holds an exclusive `flock` on
   `$XDG_RUNTIME_DIR/dock-switch.lock`, and a second one exits. Only the lock
   holder replaces a stale socket file.
-- The favorites file is re-read on each request and when a window gets a new
-  app ID, so pin changes apply without a restart.
+- The favorites file is watched with inotify (its directory, for in-place
+  writes and replacements), so each pin change is applied as it happens, like
+  the dock does; pinning and unpinning a running app between two keypresses
+  still moves it to the end. It is also re-read on each request and when a
+  window gets a new app ID, which covers a missing config directory.
 - Desktop entries are rescanned when a lookup misses (a window, a pin, or a
   slot whose pin has no entry), but only if a scanned directory's mtime
   changed, so unmatched app ids cost a few stats rather than a full scan.
