@@ -18,7 +18,8 @@ make install PREFIX=/some/prefix  # elsewhere
 make uninstall                    # also removes the shortcuts
 ```
 
-`make install` also restarts a running daemon so the new build takes over.
+`make install` also stops a running daemon; the next keypress starts the new
+build, with the session's environment rather than the terminal's.
 
 ## Shortcuts
 
