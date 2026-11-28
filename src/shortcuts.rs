@@ -7,7 +7,9 @@
 
 use std::error::Error;
 use std::fs;
-use std::path::PathBuf;
+use std::io::{self, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 
 struct Shortcut {
     modifiers: &'static [&'static str],
@@ -18,10 +20,24 @@ struct Shortcut {
 
 const DIGITS: [&str; 10] = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"];
 
+/// COSMIC runs `Spawn` commands with `/bin/sh -c`, so the binary path goes
+/// into a shell command line. Rather than quote it, only characters that mean
+/// nothing to the shell (or to RON strings) are accepted.
+fn check_path(exe: &str) -> Result<(), String> {
+    let safe = |c: char| c.is_ascii_alphanumeric() || "/._+-".contains(c);
+    match exe.chars().find(|&c| !safe(c)) {
+        None => Ok(()),
+        Some(c) => Err(format!(
+            "binary path {exe:?} contains {c:?}, which would need shell quoting; \
+             install it under a plainer path (make install PREFIX=...)"
+        )),
+    }
+}
+
 /// Every binding we own. `Super+0` means the last slot, and the workspace
-/// shortcuts we displace move to `Ctrl` variants of the same keys.
+/// shortcuts we displace move to `Ctrl` variants of the same keys. `exe` must
+/// have passed `check_path`.
 fn wanted(exe: &str) -> Vec<Shortcut> {
-    let exe = exe.replace('\\', "\\\\").replace('"', "\\\"");
     let mut out = Vec::new();
     for key in DIGITS {
         let (slot, app) = match key {
@@ -82,16 +98,18 @@ fn format_shortcut(s: &Shortcut) -> String {
     out
 }
 
-/// Splits `{ a, b, }` into its top-level entries, ignoring commas and braces
-/// inside nested groups and strings.
-fn split_entries(text: &str) -> Result<Vec<&str>, String> {
+/// Splits `{ a, b, }` into whatever precedes the map (such as a RON
+/// `#![enable(...)]` header, kept as is) and its top-level entries, ignoring
+/// commas and braces inside nested groups and strings. Comments are refused
+/// rather than guessed at; COSMIC does not write any.
+fn split_entries(text: &str) -> Result<(&str, Vec<&str>), String> {
     if text.trim().is_empty() {
-        return Ok(Vec::new());
+        return Ok(("", Vec::new()));
     }
     let open = text
         .find('{')
         .ok_or("shortcuts file does not start with '{'")?;
-    let body = &text[open + 1..];
+    let (header, body) = (&text[..open], &text[open + 1..]);
     let (mut depth, mut in_str, mut escaped) = (0i32, false, false);
     let (mut start, mut entries) = (0, Vec::new());
     for (i, c) in body.char_indices() {
@@ -106,12 +124,15 @@ fn split_entries(text: &str) -> Result<Vec<&str>, String> {
         }
         match c {
             '"' => in_str = true,
+            '/' if body[i..].starts_with("//") || body[i..].starts_with("/*") => {
+                return Err("comments in the shortcuts file are not supported".into());
+            }
             '(' | '[' | '{' => depth += 1,
             ')' | ']' => depth -= 1,
             '}' if depth == 0 => {
                 entries.push(body[start..i].trim());
                 entries.retain(|e| !e.is_empty());
-                return Ok(entries);
+                return Ok((header, entries));
             }
             '}' => depth -= 1,
             ',' if depth == 0 => {
@@ -159,7 +180,8 @@ fn split_entry(entry: &str) -> Option<(&str, &str)> {
 fn parse_binding(binding: &str) -> Option<(Vec<String>, String)> {
     let mods_at = binding.find("modifiers")?;
     let list = &binding[mods_at..];
-    let list = &list[list.find('[')? + 1..list.find(']')?];
+    let list = &list[list.find('[')? + 1..];
+    let list = &list[..list.find(']')?];
     let mut modifiers: Vec<String> = list
         .split(',')
         .map(str::trim)
@@ -196,7 +218,8 @@ fn label(s: &Shortcut) -> String {
 fn apply(text: &str, wanted: &[Shortcut], remove: bool) -> Result<(String, Vec<String>), String> {
     let mut kept = Vec::new();
     let mut replaced = Vec::new();
-    for entry in split_entries(text)? {
+    let (header, entries) = split_entries(text)?;
+    for entry in entries {
         let (binding, action) = split_entry(entry).ok_or("cannot parse a shortcuts entry")?;
         let ours = parse_binding(binding).and_then(|(mods, key)| {
             wanted.iter().find(|s| {
@@ -216,7 +239,7 @@ fn apply(text: &str, wanted: &[Shortcut], remove: bool) -> Result<(String, Vec<S
         }
     }
 
-    let mut out = String::from("{\n");
+    let mut out = format!("{header}{{\n");
     for entry in kept {
         out.push_str(&format!("    {entry},\n"));
     }
@@ -238,39 +261,51 @@ fn custom_path() -> PathBuf {
 }
 
 pub fn run(remove: bool) -> Result<(), Box<dyn Error>> {
-    let path = custom_path();
     let exe = std::env::current_exe()?;
     let exe = exe.to_str().ok_or("binary path is not UTF-8")?;
-    if exe.contains(' ') {
-        // COSMIC splits Spawn commands on whitespace.
-        return Err(format!("binary path contains a space: {exe}").into());
-    }
+    check_path(exe)?;
     let wanted = wanted(exe);
 
+    // Through a symlink (a dotfiles manager, say) to the real file, so the
+    // rename below replaces the file rather than the link.
+    let path = custom_path();
+    let path = fs::canonicalize(&path).unwrap_or(path);
     let old = match fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
         Err(e) => return Err(format!("cannot read {}: {e}", path.display()).into()),
     };
+    if remove && old.is_none() {
+        println!("no shortcuts file, nothing to remove");
+        return Ok(());
+    }
+    let old_text = old.as_deref().unwrap_or("");
     let (new, replaced) =
-        apply(&old, &wanted, remove).map_err(|e| format!("{}: {e}", path.display()))?;
+        apply(old_text, &wanted, remove).map_err(|e| format!("{}: {e}", path.display()))?;
     for r in &replaced {
         println!("replacing {r}");
     }
-    if new == old {
+    if new == old_text {
         println!("shortcuts already up to date");
         return Ok(());
     }
 
     let dir = path.parent().ok_or("shortcuts path has no parent")?;
     fs::create_dir_all(dir)?;
-    if !old.is_empty() {
-        fs::write(dir.join("custom.bak"), &old)?;
+    // Only the first run's original is kept: a later backup would hold our
+    // own bindings, and `remove` would overwrite the bindings it replaced.
+    let backup = dir.join("custom.before-dock-switch");
+    if let Some(old) = &old
+        && write_new(&backup, old, 0o600).is_ok()
+    {
+        println!("original saved as {}", backup.display());
     }
     // Rename into place: COSMIC watches the file and would otherwise read it
-    // half written.
+    // half written. The file keeps its permissions.
+    let mode = fs::metadata(&path).map_or(0o644, |m| m.permissions().mode() & 0o7777);
     let tmp = dir.join(".custom.dock-switch.tmp");
-    fs::write(&tmp, &new)?;
+    let _ = fs::remove_file(&tmp); // left over from an interrupted run
+    write_new(&tmp, &new, mode)?;
     fs::rename(&tmp, &path)?;
     let verb = if remove {
         "removed dock-switch shortcuts from"
@@ -278,13 +313,19 @@ pub fn run(remove: bool) -> Result<(), Box<dyn Error>> {
         "updated"
     };
     println!("{verb} {}", path.display());
-    if !old.is_empty() {
-        println!(
-            "previous version saved as {}",
-            dir.join("custom.bak").display()
-        );
-    }
     Ok(())
+}
+
+/// Creates a file that must not exist yet, so a planted symlink is never
+/// followed, and gives it `mode` regardless of the umask.
+fn write_new(path: &Path, text: &str, mode: u32) -> io::Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(path)?;
+    file.write_all(text.as_bytes())?;
+    file.set_permissions(fs::Permissions::from_mode(mode))
 }
 
 #[cfg(test)]
@@ -311,7 +352,7 @@ mod tests {
         assert!(out.contains("keycode: 10"));
         assert!(!out.contains("something-else"));
         assert_eq!(replaced, ["Super+Shift+1 (was Spawn(\"something-else\"))"]);
-        assert_eq!(split_entries(&out).unwrap().len(), 2 + wanted.len());
+        assert_eq!(split_entries(&out).unwrap().1.len(), 2 + wanted.len());
 
         // Running again changes nothing and reports nothing.
         let (again, replaced) = apply(&out, &wanted, false).unwrap();
@@ -320,7 +361,7 @@ mod tests {
 
         // Removing leaves only the bindings that were not ours.
         let (removed, _) = apply(&out, &wanted, true).unwrap();
-        assert_eq!(split_entries(&removed).unwrap().len(), 2);
+        assert_eq!(split_entries(&removed).unwrap().1.len(), 2);
         assert!(removed.contains("copyq") && removed.contains("keycode: 10"));
     }
 
@@ -343,6 +384,37 @@ mod tests {
             Some((vec!["Ctrl".into(), "Super".into()], "9".into()))
         );
         assert_eq!(parse_binding("(modifiers: [Super], keycode: 10)"), None);
+        // A `]` between the word "modifiers" and the list used to panic.
+        assert_eq!(
+            parse_binding("(description: Some(\"modifiers]\"), modifiers: [Super], key: \"v\")"),
+            Some((vec!["Super".into()], "v".into()))
+        );
         assert!(split_entries("{ (key: \"}\"): A, ").is_err());
+    }
+
+    #[test]
+    fn keeps_header_and_refuses_comments() {
+        let text = "#![enable(implicit_some)]\n{ (modifiers: [Super], key: \"v\"): Disable, }";
+        let (out, _) = apply(text, &wanted("/bin/dock-switch"), true).unwrap();
+        assert!(out.starts_with("#![enable(implicit_some)]\n{\n"));
+        assert!(apply("{ // note\n}", &[], true).is_err());
+        assert!(apply("{ /* } */ }", &[], true).is_err());
+        // A `//` inside a string is not a comment.
+        assert!(
+            apply(
+                "{ (modifiers: [Super], key: \"v\"): Spawn(\"a//b\"), }",
+                &[],
+                true
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn accepts_only_shell_safe_paths() {
+        assert!(check_path("/home/syl/.local/bin/dock-switch").is_ok());
+        assert!(check_path("/home/o'brien/bin/dock-switch").is_err());
+        assert!(check_path("/tmp/x$(id)/dock-switch").is_err());
+        assert!(check_path("/a b/dock-switch").is_err());
     }
 }

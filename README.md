@@ -27,8 +27,9 @@ make shortcuts
 
 This adds the bindings to COSMIC's custom shortcuts
 (`~/.config/cosmic/com.system76.CosmicSettings.Shortcuts/v1/custom`), keeping
-your other bindings and saving the previous file as `custom.bak`. Running it
-again is harmless, and `make uninstall` removes them.
+your other bindings. The first time it changes the file, it saves your
+original as `custom.before-dock-switch` next to it. Running it again is
+harmless, and `make uninstall` removes the bindings.
 
 | Keys | Action |
 |---|---|

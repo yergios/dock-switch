@@ -138,9 +138,15 @@ the old daemon instead of starting the new one.
 
 `make install` places the first two (override the location with `PREFIX=`).
 `make shortcuts` (`dock-switch shortcuts`) adds the bindings below to the
-third, replacing only bindings on the same keys and keeping the rest verbatim;
-the file is renamed into place so COSMIC never reads it half written.
-`make uninstall` runs `dock-switch shortcuts remove` first.
+third, replacing only bindings on the same keys and keeping the rest (and any
+header before the map) verbatim. The file is renamed into place so COSMIC
+never reads it half written, keeps its permissions, and is edited at its real
+location if it is a symlink. The first run that changes it saves the original
+as `custom.before-dock-switch` (never overwritten). Files with RON comments are
+refused, since the splitter does not parse them. COSMIC runs `Spawn` through
+`/bin/sh -c`, so the binary path must consist of letters, digits and `/._+-`.
+`make uninstall` runs `dock-switch shortcuts remove` first; with no shortcuts
+file it does nothing.
 
 | Path | Purpose |
 |---|---|
