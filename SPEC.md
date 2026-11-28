@@ -96,6 +96,9 @@ socket together, so there are no locks.
 
 **Focus history:** each time a window gains the activated state it gets the
 next value of a counter. "Most recently used" is the highest value.
+After sending `activate` or `set_minimized` the daemon records the expected
+state at once, since COSMIC reports it a little later and a quick second
+keypress would act on the old focus; the real state events overwrite it.
 
 **Launching:** the client runs `gio launch <desktop file>`, which handles
 `Exec` field codes and `DBusActivatable` entries. The daemon only picks the

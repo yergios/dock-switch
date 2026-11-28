@@ -190,12 +190,28 @@ impl Daemon {
             .collect()
     }
 
-    fn focus(&self, idx: usize) {
+    /// Activates a window and records the expected result right away: COSMIC
+    /// reports the new state a little later, and a quick second keypress
+    /// would otherwise act on the old focus. Its state events overwrite this.
+    fn focus(&mut self, idx: usize) {
         let w = &self.windows[idx];
         if w.minimized {
             self.manager.unset_minimized(&w.cosmic);
         }
         self.manager.activate(&w.cosmic, &self.seat);
+        for w in &mut self.windows {
+            w.activated = false;
+        }
+        self.focus_clock += 1;
+        let w = &mut self.windows[idx];
+        (w.activated, w.minimized, w.last_focus) = (true, false, self.focus_clock);
+    }
+
+    /// Minimizes a window, recording the result right away like `focus`.
+    fn minimize(&mut self, idx: usize) {
+        self.manager.set_minimized(&self.windows[idx].cosmic);
+        let w = &mut self.windows[idx];
+        (w.activated, w.minimized) = (false, true);
     }
 
     /// 0-based index and group key of a 1-based slot; `None` means the last.
@@ -226,7 +242,7 @@ impl Daemon {
         let is_focused = |i: &usize| self.windows[*i].activated && !self.windows[*i].minimized;
         if let Some(pos) = group.iter().position(is_focused) {
             if group.len() == 1 {
-                self.manager.set_minimized(&self.windows[group[0]].cosmic);
+                self.minimize(group[0]);
                 return Ok(Reply::Done);
             }
             self.focus(group[(pos + 1) % group.len()]);
