@@ -5,15 +5,22 @@ on:
     branches: [master]
   pull_request:
 
+# Read-only token: the job only builds and tests.
+permissions:
+  contents: read
+
 jobs:
   check:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      # wayland-client links against the system libwayland.
-      - run: sudo apt-get update && sudo apt-get install -y libwayland-dev
-      - uses: dtolnay/rust-toolchain@stable
+      # Actions are pinned to commits, since tags and branches can move.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Dependency build scripts run below; keep the token out of .git.
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, 2026-11-15
+        with:
+          toolchain: stable
           components: rustfmt, clippy
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings

@@ -9,7 +9,8 @@ See [SPEC.md](SPEC.md) for the full behavior and design.
 
 ## Install
 
-Needs Rust (cargo), `libwayland-dev` and `gio` (from GLib, preinstalled on Pop!_OS).
+Needs Rust (cargo) to build, and `gio` (from GLib, preinstalled on Pop!_OS) to
+launch apps. The Wayland client is pure Rust, so no system libraries are needed.
 
 ```sh
 make install                      # to ~/.local/bin, plus a login autostart entry
