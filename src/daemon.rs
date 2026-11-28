@@ -8,6 +8,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::time::{Duration, Instant};
 
 use rustix::event::{PollFd, PollFlags, poll};
+use rustix::time::Timespec;
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
 use wayland_client::protocol::{wl_registry::WlRegistry, wl_seat::WlSeat};
 use wayland_client::{
@@ -80,14 +81,12 @@ impl Daemon {
             // id, and later ones find that entry, so they share one group.
             return String::new();
         }
-        if apps::find(&self.entries, app_id).is_none() {
-            // The app may have been installed after we loaded the entries.
+        // A miss may be an app installed after we loaded the entries.
+        let found = apps::find(&self.entries, app_id).or_else(|| {
             self.refresh_entries();
-        }
-        match apps::find(&self.entries, app_id) {
-            Some(i) => self.entries[i].id.clone(),
-            None => app_id.to_string(),
-        }
+            apps::find(&self.entries, app_id)
+        });
+        found.map_or_else(|| app_id.to_string(), |i| self.entries[i].id.clone())
     }
 
     /// Rescans desktop entries if any scanned directory changed. Unmatched
@@ -220,14 +219,18 @@ impl Daemon {
         // Resolved after the reload, since a pin change can move the last slot.
         let slot = slot.unwrap_or_else(|| self.slots().count());
         let index = slot.wrapping_sub(1);
-        let key_at = |d: &Self| d.slots().nth(index).cloned();
-        let key = key_at(self).ok_or_else(|| format!("no app in slot {slot}"))?;
+        let key_at = |d: &Self| {
+            d.slots()
+                .nth(index)
+                .cloned()
+                .ok_or_else(|| format!("no app in slot {slot}"))
+        };
+        let mut key = key_at(self)?;
         // A pin with no entry and no windows may be an app installed since
         // the last scan; a rescan re-resolves the pins.
         if !self.has_windows(&key) && !self.entries.iter().any(|e| e.id == key) {
             self.refresh_entries();
-            let key = key_at(self).ok_or_else(|| format!("no app in slot {slot}"))?;
-            return Ok((index, key));
+            key = key_at(self)?;
         }
         Ok((index, key))
     }
@@ -239,22 +242,16 @@ impl Daemon {
             return self.launch(&key);
         }
 
-        let is_focused = |i: &usize| self.windows[*i].activated && !self.windows[*i].minimized;
-        if let Some(pos) = group.iter().position(is_focused) {
-            if group.len() == 1 {
-                self.minimize(group[0]);
-                return Ok(Reply::Done);
+        let is_focused = |&i: &usize| self.windows[i].activated && !self.windows[i].minimized;
+        match group.iter().position(is_focused) {
+            Some(_) if group.len() == 1 => self.minimize(group[0]),
+            Some(pos) => self.focus(group[(pos + 1) % group.len()]),
+            // Without any focus history yet, the newest window wins the tie.
+            None => {
+                let newest = group.iter().max_by_key(|&&i| self.windows[i].last_focus);
+                self.focus(*newest.expect("group is not empty"));
             }
-            self.focus(group[(pos + 1) % group.len()]);
-            return Ok(Reply::Done);
         }
-
-        // Without any focus history yet, the newest window wins the tie.
-        let target = group
-            .iter()
-            .copied()
-            .max_by_key(|&i| self.windows[i].last_focus);
-        self.focus(target.expect("group is not empty"));
         Ok(Reply::Done)
     }
 
@@ -306,18 +303,12 @@ impl Daemon {
 
         let words: Vec<&str> = line.split_whitespace().collect();
         let reply = match words.as_slice() {
-            [cmd @ ("switch" | "new"), n] => {
-                let slot = match *n {
-                    "last" => Ok(None),
-                    n => n.parse().map(Some).map_err(|_| format!("bad slot '{n}'")),
-                };
-                slot.and_then(|slot| match *cmd {
-                    "switch" => self.switch(slot),
-                    // Whether a second launch opens a new window is up to the
-                    // app; single-instance apps may just raise their window.
-                    _ => self.slot_key(slot).and_then(|(_, key)| self.launch(&key)),
-                })
-            }
+            ["switch", n] => parse_slot(n).and_then(|slot| self.switch(slot)),
+            // Whether a second launch opens a new window is up to the app;
+            // single-instance apps may just raise their window.
+            ["new", n] => parse_slot(n)
+                .and_then(|slot| self.slot_key(slot))
+                .and_then(|(_, key)| self.launch(&key)),
             ["list"] => Ok(Reply::Output(self.list())),
             _ => Err(format!("unknown request '{}'", line.trim())),
         };
@@ -375,54 +366,42 @@ pub fn run() -> Result<(), Box<dyn Error>> {
     daemon.reload_favorites();
     queue.roundtrip(&mut daemon)?;
 
-    // COSMIC sends each window's state in a deferred batch, a while after the
-    // handle is requested. Serving a request before it arrives would see no
-    // focused window, so a keypress that started the daemon would activate
-    // instead of minimize. Clients wait in the listen backlog meanwhile.
-    let deadline = Instant::now() + Duration::from_millis(500);
-    while daemon.windows.iter().any(|w| !w.state_known) {
-        let Some(left) = deadline.checked_duration_since(Instant::now()) else {
-            break;
-        };
-        flush(&conn)?;
-        if let Some(guard) = queue.prepare_read() {
-            let timeout = rustix::time::Timespec::try_from(left)?;
-            let ready = {
-                let fd = guard.connection_fd();
-                match poll(&mut [PollFd::new(&fd, PollFlags::IN)], Some(&timeout)) {
-                    Ok(n) => n > 0,
-                    Err(rustix::io::Errno::INTR) => false,
-                    Err(e) => return Err(e.into()),
-                }
-            };
-            if ready {
-                read_events(guard)?;
-            }
-        }
-        queue.dispatch_pending(&mut daemon)?;
-    }
-
     // Pins can change and change back between two requests; the dock applies
     // each change, so a watch keeps our order in step. Without one (no user
     // config directory yet), pins are still re-read on every request.
     let favorites_watch = watch_favorites();
 
+    // COSMIC sends each window's state in a deferred batch, a while after the
+    // handle is requested. Serving a request before it arrives would see no
+    // focused window, so a keypress that started the daemon would activate
+    // instead of minimize. Clients wait in the listen backlog meanwhile.
+    let startup_deadline = Instant::now() + Duration::from_millis(500);
+
     loop {
         queue.dispatch_pending(&mut daemon)?;
         flush(&conn)?;
+        let startup_left = startup_deadline
+            .checked_duration_since(Instant::now())
+            .filter(|_| daemon.windows.iter().any(|w| !w.state_known));
         let Some(guard) = queue.prepare_read() else {
             continue;
         };
         let (wayland_ready, client_ready, favorites_changed) = {
             let fd = guard.connection_fd();
+            let clients = if startup_left.is_some() {
+                PollFlags::empty()
+            } else {
+                PollFlags::IN
+            };
             let mut fds = vec![
                 PollFd::new(&fd, PollFlags::IN),
-                PollFd::new(&listener, PollFlags::IN),
+                PollFd::new(&listener, clients),
             ];
             if let Some(watch) = &favorites_watch {
                 fds.push(PollFd::new(watch, PollFlags::IN));
             }
-            match poll(&mut fds, None) {
+            let timeout = startup_left.map(Timespec::try_from).transpose()?;
+            match poll(&mut fds, timeout.as_ref()) {
                 Ok(_) => {}
                 Err(rustix::io::Errno::INTR) => continue,
                 Err(e) => return Err(e.into()),
@@ -468,6 +447,14 @@ fn watch_favorites() -> Option<rustix::fd::OwnedFd> {
         WatchFlags::CLOSE_WRITE | WatchFlags::MOVED_TO | WatchFlags::CREATE | WatchFlags::DELETE;
     inotify::add_watch(&fd, apps::favorites_dir(), events).ok()?;
     Some(fd)
+}
+
+/// A 1-based slot number, or `None` for `last`.
+fn parse_slot(n: &str) -> Result<Option<usize>, String> {
+    match n {
+        "last" => Ok(None),
+        n => n.parse().map(Some).map_err(|_| format!("bad slot '{n}'")),
+    }
 }
 
 /// Longest valid request is `switch <number>`; anything near this is garbage.
@@ -639,19 +626,17 @@ impl Dispatch<ZcosmicToplevelHandleV1, ()> for Daemon {
         let Some(i) = state.windows.iter().position(|w| w.cosmic == *handle) else {
             return;
         };
-        let flags: Vec<u32> = bytes
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|c| u32::from_ne_bytes(*c))
-            .collect();
-        let activated = flags.contains(&STATE_ACTIVATED);
+        let has = |flag: u32| {
+            let flags = bytes.as_chunks::<4>().0;
+            flags.iter().any(|c| u32::from_ne_bytes(*c) == flag)
+        };
+        let activated = has(STATE_ACTIVATED);
         if activated && !state.windows[i].activated {
             state.focus_clock += 1;
             state.windows[i].last_focus = state.focus_clock;
         }
         state.windows[i].activated = activated;
-        state.windows[i].minimized = flags.contains(&STATE_MINIMIZED);
+        state.windows[i].minimized = has(STATE_MINIMIZED);
         state.windows[i].state_known = true;
     }
 }
